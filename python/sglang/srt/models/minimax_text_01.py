@@ -7,9 +7,11 @@ import torch.nn.functional as F
 from einops import rearrange
 from sgl_kernel import lightning_attention_decode
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -26,6 +28,9 @@ from sglang.srt.layers.linear import (
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.utils import PPMissingLayer
+from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from sglang.srt.utils import make_layers
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -748,20 +753,19 @@ class MiniMaxText01Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        def layer_fn(prefix):
-            layer_idx = int(prefix.split(".")[-1])
+        def layer_fn(layer_id: int, prefix: str):
             layer_config = config
-            layer_config.attention_type = self.decoder_attention_types[layer_idx]
-            layer_config.layer_idx = layer_idx
+            layer_config.attention_type = self.decoder_attention_types[layer_id]
+            layer_config.layer_idx = layer_id
 
             decoder_kwargs = {
                 "quant_config": quant_config,
-                "layer_id": layer_idx,
+                "layer_id": layer_id,
             }
 
             if layer_config.attention_type == 0:
                 decoder_kwargs["linear_layer_id"] = sum(
-                    1 for i in range(layer_idx) if self.decoder_attention_types[i] == 0
+                    1 for i in range(layer_id) if self.decoder_attention_types[i] == 0
                 )
             else:
                 decoder_kwargs["linear_layer_id"] = None
@@ -769,7 +773,7 @@ class MiniMaxText01Model(nn.Module):
             if hasattr(config, "num_local_experts") and isinstance(
                 config.num_local_experts, list
             ):
-                decoder_kwargs["expert_num"] = config.num_local_experts[layer_idx]
+                decoder_kwargs["expert_num"] = config.num_local_experts[layer_id]
             elif hasattr(config, "num_local_experts") and isinstance(
                 config.num_local_experts, int
             ):
