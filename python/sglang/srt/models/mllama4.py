@@ -11,6 +11,7 @@ from transformers import Llama4Config, Llama4VisionConfig
 from transformers.models.llama4.modeling_llama4 import Llama4MultiModalProjector
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
+from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -891,6 +892,14 @@ class Llama4ForConditionalGeneration(nn.Module):
 
     def set_embed(self, embed):
         return self.language_model.set_embed(embed)
+
+    @classmethod
+    def get_model_config_for_expert_location(cls, config):
+        return ModelConfigForExpertLocation(
+            num_layers=config.text_config.num_hidden_layers,
+            num_logical_experts=config.text_config.num_local_experts,
+            num_groups=None,
+        )
 
 
 EntryClass = Llama4ForConditionalGeneration
