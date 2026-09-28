@@ -1367,11 +1367,9 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
     if not use_routed_topk and TopKOutputChecker.format_is_standard(topk_output):
         use_routed_topk = True
 
-    defer_finalize = (
-        _deferred_finalize_enabled.get()
-        and not use_routed_topk
-        and TopKOutputChecker.format_is_bypassed(topk_output)
-    )
+    # Finalize runs after routing, so the routed kernel defers it too and returns
+    # the same do_finalize=False triple as the logits-based one.
+    defer_finalize = _deferred_finalize_enabled.get()
 
     symm_output = None
     if not defer_finalize:
@@ -1413,6 +1411,7 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
 
     if use_routed_topk:
         routing = _get_routing_for_flashinfer_routed(topk_output)
+        routed_top_k = _routing_top_k(routing)
         result = trtllm_fp4_block_scale_routed_moe(
             topk_ids=routing,
             routing_bias=None,
@@ -1432,7 +1431,7 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
             output2_scale_scalar=quant_info.g2_alphas,
             per_token_scale=per_token_scale,
             num_experts=quant_info.global_num_experts,
-            top_k=_routing_top_k(routing),
+            top_k=routed_top_k,
             n_group=0,
             topk_group=0,
             intermediate_size=quant_info.intermediate_size_per_partition,
@@ -1440,12 +1439,16 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
             local_num_experts=quant_info.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # Unused, but must be 1 to pass validation.
-            do_finalize=True,
+            do_finalize=not defer_finalize,
             activation_type=activation_type,
             tune_max_num_tokens=next_power_of_2(hs_fp4.shape[0]),
             output=symm_output,
             enable_pdl=trtllm_moe_enable_pdl(hs_fp4.shape[0]),
-        )[0]
+        )
+        if defer_finalize:
+            result = _make_deferred_finalize_output(result, top_k=routed_top_k)
+        else:
+            result = result[0]
     else:
         assert TopKOutputChecker.format_is_bypassed(topk_output)
 

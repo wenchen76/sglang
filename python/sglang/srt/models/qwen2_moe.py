@@ -714,9 +714,10 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                     "Qwen deferred finalize requires a compatible FlashInfer "
                     "TRTLLM MoE producer and a separate shared expert"
                 )
-            if not TopKOutputChecker.format_is_bypassed(topk_output):
+            if not self.experts.can_defer_finalize(topk_output):
                 raise RuntimeError(
-                    "Qwen deferred finalize requires logits-based bypassed TopK"
+                    "Qwen deferred finalize requires a TopK format the MoE runner "
+                    f"can defer, got {topk_output.format!r}"
                 )
             return self.experts.forward_deferred_finalize(hidden_states, topk_output)
         if self.enable_shared_expert_fusion and TopKOutputChecker.format_is_standard(

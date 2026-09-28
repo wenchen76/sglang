@@ -110,7 +110,11 @@ class MoeFinalizeHandoff(HandoffOutput, frozen=True):
             routed_output=deferred_output.gemm2_out.view(
                 -1, deferred_output.gemm2_out.shape[-1]
             ),
-            expert_weights=deferred_output.expert_weights.view(-1, top_k)[:m],
+            # The CuTe DSL finalize only takes bf16 weights; the routed kernel returns
+            # the caller's top-k weights, which may be fp32.
+            expert_weights=deferred_output.expert_weights.view(-1, top_k)[:m].to(
+                torch.bfloat16
+            ),
             permuted_indices=deferred_output.expanded_idx_to_permuted_idx.view(
                 -1, top_k
             )[:m],
