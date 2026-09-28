@@ -51,6 +51,8 @@ from sglang.srt.layers.moe.topk import (
 )
 from sglang.srt.layers.moe.utils import (
     DispatcherOutputDtype,
+    MoeA2ABackend,
+    MoeRunnerBackend,
     RoutingMethodType,
     get_deepep_v2_dispatcher_output_dtype,
     has_per_rank_fused_shared_slots,
@@ -120,6 +122,28 @@ def _fuses_routed_scaling_factor_in_topk(quant_method) -> bool:
         or (
             isinstance(quant_method, UnquantizedFusedMoEMethod)
             and get_moe_runner_backend().is_flashinfer_trtllm_routed()
+        )
+    )
+
+
+def _defers_precomputed_topk_finalize(
+    *,
+    nvfp4_deferred: bool,
+    moe_runner_backend: MoeRunnerBackend,
+    moe_a2a_backend: MoeA2ABackend,
+) -> bool:
+    # Precomputed top-k runs the routed NVFP4 kernel, which defers finalize too.
+    # experimental_sgl_trtllm sends it to LoRA kernels that always finalize,
+    # and an A2A combine needs the finalized output, so both are left out.
+    return (
+        nvfp4_deferred
+        and moe_a2a_backend.is_none()
+        and (
+            moe_runner_backend.is_flashinfer_trtllm_routed()
+            or (
+                moe_runner_backend.is_flashinfer_trtllm()
+                and not moe_runner_backend.is_experimental_sgl_trtllm()
+            )
         )
     )
 
@@ -504,10 +528,16 @@ class FusedMoE(torch.nn.Module):
             and isinstance(self.quant_method, Fp8MoEMethod)
             and self.quant_method.block_quant
         )
-        self.supports_deferred_finalize = (
-            get_moe_runner_backend().is_flashinfer_trtllm()
-            and (nvfp4_deferred or qwen35_fp8_deferred)
+        moe_runner_backend = get_moe_runner_backend()
+        self._defers_precomputed_topk_finalize = _defers_precomputed_topk_finalize(
+            nvfp4_deferred=nvfp4_deferred,
+            moe_runner_backend=moe_runner_backend,
+            moe_a2a_backend=get_moe_a2a_backend(),
         )
+        self.supports_deferred_finalize = (
+            moe_runner_backend.is_flashinfer_trtllm()
+            and (nvfp4_deferred or qwen35_fp8_deferred)
+        ) or self._defers_precomputed_topk_finalize
         global _deferred_finalize_info_logged
         if not _deferred_finalize_info_logged:
             _deferred_finalize_info_logged = True
@@ -1618,6 +1648,16 @@ class FusedMoE(torch.nn.Module):
                 hidden_states_pre_quant=pre_quant_input
             )
         return dispatch_output
+
+    def can_defer_finalize(self, topk_output: TopKOutput) -> bool:
+        """Whether forward_deferred_finalize returns an unfinalized output for this top-k."""
+        if TopKOutputChecker.format_is_bypassed(topk_output):
+            return self.supports_deferred_finalize
+        if TopKOutputChecker.format_is_standard(
+            topk_output
+        ) or TopKOutputChecker.format_is_packed(topk_output):
+            return self._defers_precomputed_topk_finalize
+        return False
 
     def forward_deferred_finalize(
         self,

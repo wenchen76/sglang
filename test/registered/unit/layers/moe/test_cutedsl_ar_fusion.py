@@ -337,7 +337,31 @@ def test_the_handoff_views_the_producer_storage():
 
     assert handoff.routed_output.data_ptr() == gemm2_out.data_ptr()
     assert handoff.permuted_indices.data_ptr() == permuted_indices.data_ptr()
+    assert handoff.expert_weights.data_ptr() == expert_weights.data_ptr()
     assert tuple(handoff.expert_weights.shape) == (m, top_k)
+
+
+def test_the_handoff_gives_the_kernel_bf16_weights():
+    """FlashInfer's CuTe DSL finalize rejects non-bf16 expert weights, and the routed
+    MoE kernel hands back the caller's top-k weights, which may be fp32."""
+    m, top_k = 3, 2
+    expert_weights = torch.rand(m, top_k, dtype=torch.float32)
+    handoff = MoeFinalizeHandoff.from_flashinfer(
+        SimpleNamespace(
+            gemm2_out=torch.empty(m * top_k, 16, dtype=torch.bfloat16),
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=torch.empty(m, top_k, dtype=torch.int32),
+            top_k=top_k,
+        ),
+        gated_shared_output=torch.empty(m, 16, dtype=torch.bfloat16),
+        m=m,
+        reduce=lambda h: h,
+    )
+
+    assert handoff.expert_weights.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        handoff.expert_weights, expert_weights.to(torch.bfloat16)
+    )
 
 
 def _handoff(finish):
